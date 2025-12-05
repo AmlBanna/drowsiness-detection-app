@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import tensorflow as tf
 from pathlib import Path
+import streamlit as st
 
 # ==================== CONFIG ====================
 MODEL_PATH = Path("models/improved_cnn_best.keras")
@@ -24,25 +25,23 @@ def predict_batch(eyes):
     if len(eyes) == 0: return np.array([])
     return model.predict(eyes, verbose=0).flatten()
 
-# Face Detection (DNN + Fallback)
+# === Face Detection Setup (خارج الدالة) ===
 net = None
 try:
     net = cv2.dnn.readNetFromCaffe("models/deploy.prototxt", "models/res10_300x300_ssd_iter_140000.caffemodel")
-except:
+    print("DNN Face Detector: شغال")
+except Exception as e:
+    print(f"DNN فشل: {e}, بنستخدم Haar Cascade")
     net = None
 
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
 
-def preprocess_eye(eye_img):
-    eye = cv2.resize(eye_img, INPUT_SIZE, interpolation=cv2.INTER_LINEAR)
-    eye = eye.astype(np.float32) / 255.0
-    return np.expand_dims(eye, axis=-1)
-
+# === الدالة الرئيسية ===
 def detect_drowsiness(frame, history=[]):
     h_orig, w_orig = frame.shape[:2]
     scale = BASE_SCALE if min(w_orig, h_orig) >= 400 else 1.0
-    small_frame = cv2.resize(frame, (0,0), fx=scale, fy=scale)
+    small_frame = cv2.resize(frame, (0, 0), fx=scale, fy=scale)
     gray = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
 
     closed_counter = history[-1] if history else 0
@@ -50,8 +49,8 @@ def detect_drowsiness(frame, history=[]):
     eye_boxes = []
     faces = []
 
-    # DNN أو Haar
-    if net:
+    # === DNN أو Haar ===
+    if net is not None:  # نستخدم is not None
         try:
             h, w = small_frame.shape[:2]
             blob = cv2.dnn.blobFromImage(small_frame, 1.0, (300, 300), (104, 177, 123))
@@ -62,23 +61,25 @@ def detect_drowsiness(frame, history=[]):
                 if conf < 0.5: continue
                 box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
                 x1, y1, x2, y2 = box.astype(int)
-                fw, fh = x2-x1, y2-y1
+                fw, fh = x2 - x1, y2 - y1
                 if fw < MIN_FACE_SIZE or fh < MIN_FACE_SIZE: continue
                 faces.append((x1, y1, fw, fh))
-        except:
-            net = None
+        except Exception as e:
+            print(f"DNN فشل أثناء التشغيل: {e}")
+            net = None  # نعطل DNN لو فشل
 
+    # === Fallback: Haar Cascade ===
     if not faces:
         detected = face_cascade.detectMultiScale(gray, 1.1, 4, minSize=(MIN_FACE_SIZE, MIN_FACE_SIZE))
-        faces = [(x, y, w, h) for (x, y, w, h) in detected]
+        faces = [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in detected]
 
-    # Eye Detection
+    # === Eye Detection ===
     for (x, y, w, h) in faces:
-        roi_gray = gray[y:y+int(h*0.65), x:x+w]
-        eyes = eye_cascade.detectMultiScale(roi_gray, 1.05, 4, minSize=(20,20), maxSize=(80,80))
+        roi_gray = gray[y:y + int(h * 0.65), x:x + w]
+        eyes = eye_cascade.detectMultiScale(roi_gray, 1.05, 4, minSize=(20, 20), maxSize=(80, 80))
         for (ex, ey, ew, eh) in eyes:
             if ey > roi_gray.shape[0] * 0.55: continue
-            eye_img = roi_gray[ey:ey+eh, ex:ex+ew]
+            eye_img = roi_gray[ey:ey + eh, ex:ex + ew]
             if eye_img.size == 0 or min(ew, eh) < 18: continue
             eyes_batch.append(preprocess_eye(eye_img))
             sx = w_orig / small_frame.shape[1]
@@ -89,6 +90,7 @@ def detect_drowsiness(frame, history=[]):
             eh_full = int(eh * sy)
             eye_boxes.append((ex_full, ey_full, ew_full, eh_full))
 
+    # === Prediction ===
     preds = predict_batch(np.array(eyes_batch)) if eyes_batch else np.array([])
     eyes_closed = len(preds) > 0 and any(p < 0.5 for p in preds)
     eyes_detected = len(eyes_batch) > 0
@@ -101,20 +103,31 @@ def detect_drowsiness(frame, history=[]):
     alert = closed_counter >= CLOSED_THRESHOLD
     status = "نائم" if alert else ("مغلق" if eyes_closed else "مفتوح")
 
-    # Draw
+    # === Draw ===
     display = frame.copy()
     for pred, box in zip(preds, eye_boxes):
         color = (0, 255, 0) if pred > 0.5 else (0, 0, 255)
         label = f"{'مفتوح' if pred > 0.5 else 'مغلق'} {pred:.2f}"
-        cv2.rectangle(display, (box[0], box[1]), (box[0]+box[2], box[1]+box[3]), color, 2)
-        cv2.putText(display, label, (box[0], box[1]-8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        cv2.rectangle(display, (box[0], box[1]), (box[0] + box[2], box[1] + box[3]), color, 2)
+        cv2.putText(display, label, (box[0], box[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+    if not eyes_detected and faces:
+        cv2.putText(display, "العيون غير مرئية", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2)
 
     if alert:
-        cv2.rectangle(display, (0,0), (display.shape[1], 100), (0,0,255), -1)
-        cv2.putText(display, "تنبيه: النعاس!", (60, 55), cv2.FONT_HERSHEY_SIMPLEX, 1.3, (255,255,255), 3)
-        cv2.putText(display, "استيقظ!", (60, 90), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255,255,255), 2)
+        cv2.rectangle(display, (0, 0), (display.shape[1], 100), (0, 0, 255), -1)
+        cv2.putText(display, "تنبيه: النعاس!", (60, 55), cv2.FONT_HERSHEY_SIMPLEX, 1.3, (255, 255, 255), 3)
+        cv2.putText(display, "استيقظ!", (60, 90), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
 
-    cv2.putText(display, f"الحالة: {status}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255) if alert else (0,255,0), 2)
-    cv2.putText(display, f"مغلق: {closed_counter}", (10, display.shape[0]-20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
+    cv2.putText(display, f"الحالة: {status}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                (0, 0, 255) if alert else (0, 255, 0), 2)
+    cv2.putText(display, f"مغلق: {closed_counter}", (10, display.shape[0] - 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
     return display, closed_counter, alert, status
+
+# === دالة مساعدة ===
+def preprocess_eye(eye_img):
+    eye = cv2.resize(eye_img, INPUT_SIZE, interpolation=cv2.INTER_LINEAR)
+    eye = eye.astype(np.float32) / 255.0
+    return np.expand_dims(eye, axis=-1)
