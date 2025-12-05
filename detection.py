@@ -3,7 +3,6 @@ import cv2
 import numpy as np
 import tensorflow as tf
 from pathlib import Path
-import streamlit as st
 
 # ==================== CONFIG ====================
 MODEL_PATH = Path("models/improved_cnn_best.keras")
@@ -13,32 +12,26 @@ BASE_SCALE = 0.7
 MIN_FACE_SIZE = 80
 # ===============================================
 
-# تحميل النموذج
-try:
-    model = tf.keras.models.load_model(str(MODEL_PATH))
-    print("تم تحميل improved_cnn_best.keras")
-except Exception as e:
-    st.error(f"خطأ في تحميل النموذج: {e}")
-    st.stop()
-
-def predict_batch(eyes):
-    if len(eyes) == 0: return np.array([])
-    return model.predict(eyes, verbose=0).flatten()
-
-# === Face Detection Setup (خارج الدالة) ===
-net = None
-try:
-    net = cv2.dnn.readNetFromCaffe("models/deploy.prototxt", "models/res10_300x300_ssd_iter_140000.caffemodel")
-    print("DNN Face Detector: شغال")
-except Exception as e:
-    print(f"DNN فشل: {e}, بنستخدم Haar Cascade")
-    net = None
-
-face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
-
-# === الدالة الرئيسية ===
 def detect_drowsiness(frame, history=[]):
+    # تحميل النموذج داخل الدالة (مرة واحدة)
+    global _model, _net, _face_cascade, _eye_cascade
+    if '_model' not in globals():
+        try:
+            _model = tf.keras.models.load_model(str(MODEL_PATH))
+            print("تم تحميل النموذج")
+        except Exception as e:
+            raise RuntimeError(f"فشل تحميل النموذج: {e}")
+
+        # DNN
+        _net = None
+        try:
+            _net = cv2.dnn.readNetFromCaffe("models/deploy.prototxt", "models/res10_300x300_ssd_iter_140000.caffemodel")
+        except:
+            pass
+
+        _face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        _eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
+
     h_orig, w_orig = frame.shape[:2]
     scale = BASE_SCALE if min(w_orig, h_orig) >= 400 else 1.0
     small_frame = cv2.resize(frame, (0, 0), fx=scale, fy=scale)
@@ -49,13 +42,13 @@ def detect_drowsiness(frame, history=[]):
     eye_boxes = []
     faces = []
 
-    # === DNN أو Haar ===
-    if net is not None:  # نستخدم is not None
+    # DNN أو Haar
+    if _net is not None:
         try:
             h, w = small_frame.shape[:2]
             blob = cv2.dnn.blobFromImage(small_frame, 1.0, (300, 300), (104, 177, 123))
-            net.setInput(blob)
-            detections = net.forward()
+            _net.setInput(blob)
+            detections = _net.forward()
             for i in range(detections.shape[2]):
                 conf = detections[0, 0, i, 2]
                 if conf < 0.5: continue
@@ -64,19 +57,17 @@ def detect_drowsiness(frame, history=[]):
                 fw, fh = x2 - x1, y2 - y1
                 if fw < MIN_FACE_SIZE or fh < MIN_FACE_SIZE: continue
                 faces.append((x1, y1, fw, fh))
-        except Exception as e:
-            print(f"DNN فشل أثناء التشغيل: {e}")
-            net = None  # نعطل DNN لو فشل
+        except:
+            _net = None
 
-    # === Fallback: Haar Cascade ===
     if not faces:
-        detected = face_cascade.detectMultiScale(gray, 1.1, 4, minSize=(MIN_FACE_SIZE, MIN_FACE_SIZE))
-        faces = [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in detected]
+        detected = _face_cascade.detectMultiScale(gray, 1.1, 4, minSize=(MIN_FACE_SIZE, MIN_FACE_SIZE))
+        faces = [(int(x), int(y), int(w), int(h)) for x, y, w, h in detected]
 
-    # === Eye Detection ===
+    # Eye Detection
     for (x, y, w, h) in faces:
         roi_gray = gray[y:y + int(h * 0.65), x:x + w]
-        eyes = eye_cascade.detectMultiScale(roi_gray, 1.05, 4, minSize=(20, 20), maxSize=(80, 80))
+        eyes = _eye_cascade.detectMultiScale(roi_gray, 1.05, 4, minSize=(20, 20), maxSize=(80, 80))
         for (ex, ey, ew, eh) in eyes:
             if ey > roi_gray.shape[0] * 0.55: continue
             eye_img = roi_gray[ey:ey + eh, ex:ex + ew]
@@ -90,8 +81,8 @@ def detect_drowsiness(frame, history=[]):
             eh_full = int(eh * sy)
             eye_boxes.append((ex_full, ey_full, ew_full, eh_full))
 
-    # === Prediction ===
-    preds = predict_batch(np.array(eyes_batch)) if eyes_batch else np.array([])
+    # Prediction
+    preds = _model.predict(np.array(eyes_batch), verbose=0).flatten() if eyes_batch else np.array([])
     eyes_closed = len(preds) > 0 and any(p < 0.5 for p in preds)
     eyes_detected = len(eyes_batch) > 0
 
@@ -103,16 +94,13 @@ def detect_drowsiness(frame, history=[]):
     alert = closed_counter >= CLOSED_THRESHOLD
     status = "نائم" if alert else ("مغلق" if eyes_closed else "مفتوح")
 
-    # === Draw ===
+    # Draw
     display = frame.copy()
     for pred, box in zip(preds, eye_boxes):
         color = (0, 255, 0) if pred > 0.5 else (0, 0, 255)
         label = f"{'مفتوح' if pred > 0.5 else 'مغلق'} {pred:.2f}"
         cv2.rectangle(display, (box[0], box[1]), (box[0] + box[2], box[1] + box[3]), color, 2)
         cv2.putText(display, label, (box[0], box[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-
-    if not eyes_detected and faces:
-        cv2.putText(display, "العيون غير مرئية", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2)
 
     if alert:
         cv2.rectangle(display, (0, 0), (display.shape[1], 100), (0, 0, 255), -1)
@@ -126,7 +114,6 @@ def detect_drowsiness(frame, history=[]):
 
     return display, closed_counter, alert, status
 
-# === دالة مساعدة ===
 def preprocess_eye(eye_img):
     eye = cv2.resize(eye_img, INPUT_SIZE, interpolation=cv2.INTER_LINEAR)
     eye = eye.astype(np.float32) / 255.0
