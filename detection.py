@@ -12,18 +12,26 @@ BASE_SCALE = 0.7
 MIN_FACE_SIZE = 80
 # ===============================================
 
-# تحميل النموذج Keras
-print("جاري تحميل النموذج improved_cnn_best.keras...")
-model = tf.keras.models.load_model(str(MODEL_PATH))
-print("تم تحميل النموذج بنجاح")
+# تحميل النموذج
+try:
+    model = tf.keras.models.load_model(str(MODEL_PATH))
+    print("تم تحميل improved_cnn_best.keras")
+except Exception as e:
+    st.error(f"خطأ في تحميل النموذج: {e}")
+    st.stop()
 
 def predict_batch(eyes):
-    if len(eyes) == 0:
-        return np.array([])
+    if len(eyes) == 0: return np.array([])
     return model.predict(eyes, verbose=0).flatten()
 
-# DNN Face Detector
-net = cv2.dnn.readNetFromCaffe("models/deploy.prototxt", "models/res10_300x300_ssd_iter_140000.caffemodel")
+# Face Detection (DNN + Fallback)
+net = None
+try:
+    net = cv2.dnn.readNetFromCaffe("models/deploy.prototxt", "models/res10_300x300_ssd_iter_140000.caffemodel")
+except:
+    net = None
+
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
 
 def preprocess_eye(eye_img):
@@ -40,21 +48,29 @@ def detect_drowsiness(frame, history=[]):
     closed_counter = history[-1] if history else 0
     eyes_batch = []
     eye_boxes = []
-
-    # Face Detection
-    h, w = small_frame.shape[:2]
-    blob = cv2.dnn.blobFromImage(small_frame, 1.0, (300, 300), (104, 177, 123))
-    net.setInput(blob)
-    detections = net.forward()
     faces = []
-    for i in range(detections.shape[2]):
-        conf = detections[0, 0, i, 2]
-        if conf < 0.5: continue
-        box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-        x1, y1, x2, y2 = box.astype(int)
-        fw, fh = x2-x1, y2-y1
-        if fw < MIN_FACE_SIZE or fh < MIN_FACE_SIZE: continue
-        faces.append((x1, y1, fw, fh))
+
+    # DNN أو Haar
+    if net:
+        try:
+            h, w = small_frame.shape[:2]
+            blob = cv2.dnn.blobFromImage(small_frame, 1.0, (300, 300), (104, 177, 123))
+            net.setInput(blob)
+            detections = net.forward()
+            for i in range(detections.shape[2]):
+                conf = detections[0, 0, i, 2]
+                if conf < 0.5: continue
+                box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+                x1, y1, x2, y2 = box.astype(int)
+                fw, fh = x2-x1, y2-y1
+                if fw < MIN_FACE_SIZE or fh < MIN_FACE_SIZE: continue
+                faces.append((x1, y1, fw, fh))
+        except:
+            net = None
+
+    if not faces:
+        detected = face_cascade.detectMultiScale(gray, 1.1, 4, minSize=(MIN_FACE_SIZE, MIN_FACE_SIZE))
+        faces = [(x, y, w, h) for (x, y, w, h) in detected]
 
     # Eye Detection
     for (x, y, w, h) in faces:
