@@ -1,13 +1,13 @@
-# app.py
+# app.py (نفس اللي فات، لكن نضمن إن st موجود)
 import streamlit as st
 import cv2
 import numpy as np
 from PIL import Image
 import time
 import pandas as pd
+import os
 from detection import detect_drowsiness
 
-# تنبيه صوتي
 def play_alert():
     st.markdown("""
     <script>
@@ -15,6 +15,8 @@ def play_alert():
     audio.play();
     </script>
     """, unsafe_allow_html=True)
+
+# باقي الكود زي ما هو (اللي فوق)
 
 # CSS
 st.set_page_config(page_title="كشف النعاس الذكي", layout="wide")
